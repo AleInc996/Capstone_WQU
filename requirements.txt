@@ -1,1 +1,3 @@
-# Potential requirements needed in terms of Python libraries to be installed
+# Requirements needed in terms of Python libraries to be installed
+
+pip install tensorflow
