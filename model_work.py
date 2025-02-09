@@ -17,7 +17,6 @@ from sklearn.model_selection import train_test_split
 import yfinance as yf
 from datetime import datetime
 from sklearn.metrics import mean_squared_error
-from xgboost import XGBRegressor
 
 ### 1. Data preparation and manipulation
 
@@ -26,6 +25,7 @@ spy_prices = yf.download('SPY', start = '2005-07-01', end = '2024-12-31', interv
 spy_prices = spy_prices['Adj Close'] # taking only adjusted close prices
 
 spy_rets = spy_prices.pct_change().dropna() # computing returns and dropping NAs (most importantly, dropping the first observation)
+spy_rets.rename('SPY returns', inplace = True) # renaming the column as now we have returns and not prices
 
 vix_data_ahead = pd.read_excel('VIX_term_structure_20250117.xlsx', header = 0) # uploading VIX futures ahead term structure data
 vix_data_ahead = vix_data_ahead.drop(vix_data_ahead.index[0]) # removing first unnecessary row
@@ -97,7 +97,7 @@ constant_maturity_ahead['vix_slope'] = constant_maturity_ahead["Constant Maturit
 #constant_maturity_ahead['vix_slope']= constant_maturity_ahead['vix_slope'].dropna()
 
 # computing the slope of the historical term structure
-constant_maturity_hist["vix_slope"] = constant_maturity_hist["Constant Maturity Price"].diff() / constant_maturity_hist["Days past"].diff()
+constant_maturity_hist["vix_slope"] = constant_maturity_hist["Constant Maturity Price"].diff() / constant_maturity_hist["Days past"].diff() # maybe a negative sign in front of it?
 #constant_maturity_hist["vix_slope"] = constant_maturity_hist["vix_slope"].dropna()
 #constant_maturity_hist.rename(columns = {'Period': 'Date'}, inplace = True)
 
@@ -107,7 +107,7 @@ correlation_dataset = constant_maturity_hist.join(spy_rets, how = 'left') # addi
 correlation_dataset = correlation_dataset.drop(['Tenor', 'Ticker', 'Last Price', 'Days past', 'Constant Maturity Price'], axis = 1) # dropping unnecessary columns for correlation analysis
 
 vol_indicator = rolling_std(spy_rets, time_interval = 5).dropna() # calculating volatility indicator on the returns of SPY
-correlation_indicator = rolling_correlation(correlation_dataset['vix_slope'], correlation_dataset['Adj Close'], time_interval = 5).dropna() # computing correlation indicator between SPY returns and historical VIX slope
+correlation_indicator = rolling_correlation(correlation_dataset['vix_slope'], correlation_dataset['SPY returns'], time_interval = 5).dropna() # computing correlation indicator between SPY returns and historical VIX slope
 roc_indicator = ROC(correlation_dataset['vix_slope']).dropna() # calculating rate of change of the historical VIX futures constant maturity term structure slope
 roc_indicator.replace([np.inf, -np.inf], np.nan, inplace = True) # replacing infinite values with nan, as there are a couple of zeros in the slope columns which generate inf
 roc_indicator.dropna(inplace = True) # dropping again rows with nan values
@@ -123,7 +123,7 @@ print(roc_indicator)
 ### 2. Training Momentum Transformer model
 
 correlation_dataset = correlation_dataset.dropna() # dropping the first NAs due to rolling window
-spy_rets_training = correlation_dataset['Adj Close'] # identifying the historical SPY returns for training
+spy_rets_training = correlation_dataset['SPY returns'] # identifying the historical SPY returns for training
 vix_slope_training = correlation_dataset['vix_slope'] # identifying the historical VIX slope for training
 
 vol_indicator_training = rolling_std(spy_rets_training, time_interval = 5).dropna() # computing volatility indicator for the training part
@@ -144,7 +144,7 @@ X_transformer, y_transformer = [], [] # pre-allocating memory for appending stan
 sequence_length = 5 # instead of considering single data points, deciding for the length of a sequence of consecutive observations to fed the model with, in order to try to capture temporal dependencies
 
 for i in range(sequence_length, len(scaled_features_transformer)): # appending
-    X_transformer.append(scaled_features_transformer[i-sequence_length:i])
+    X_transformer.append(scaled_features_transformer[i-sequence_length:i]) # take vix slope and not scaled
     y_transformer.append(spy_rets_training.iloc[i])
 
 X_transformer = np.array(X_transformer) # turning the list into a numpy array
@@ -159,7 +159,7 @@ transformer_model = Sequential([ # grouping layers into a model with Sequential,
     Dropout(0.2), # first dropout rate
     LSTM(32, return_sequences = False), # second Long-Short Term Memory approach
     Dropout(0.2), # second dropout rate
-    Dense(1, activation='sigmoid') # the output is a single value
+    Dense(1, activation='sigmoid') # the output is a single value, try to see what happens if you change sigmoid with classification
 ])
 
 transformer_model.compile(optimizer = 'adam', loss = 'mean_squared_error') # compiling with adam optimizer and mean-squared error loss
@@ -178,6 +178,12 @@ print(rmse)
 # for 2025 SPY returns estimates, instead of running another model on our own, we decided to make use of the estimates from:
 # https://usdforecast.com/ , the website of the Economy Forecast Agency (EFA)
 # https://longforecast.com/spy-stock
+
+spy_prices_pred_2025 = pd.read_excel('spy_pred_2025.xlsx') # uploading predicted prices of SPY for 2025
+spy_prices_pred_2025 = spy_prices_pred_2025[['Month', 'Close']] # taking only the month and the close prices
+
+forward_vix_slope = constant_maturity_ahead[['Period', 'vix_slope']] # storing the ahead vix slope in a new variable
+forward_vix_slope = constant_maturity_ahead['vix_slope'] # storing the ahead vix slope in a new variable
 
 
 
