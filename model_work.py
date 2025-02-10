@@ -144,7 +144,7 @@ X_transformer, y_transformer = [], [] # pre-allocating memory for appending stan
 sequence_length = 5 # instead of considering single data points, deciding for the length of a sequence of consecutive observations to fed the model with, in order to try to capture temporal dependencies
 
 for i in range(sequence_length, len(scaled_features_transformer)): # appending
-    X_transformer.append(scaled_features_transformer[i-sequence_length:i]) # take vix slope and not scaled
+    X_transformer.append(scaled_features_transformer[i-sequence_length:i]) # TAKE VIX_SLOPE AND NOT SCALED_FEATURES???
     y_transformer.append(spy_rets_training.iloc[i])
 
 X_transformer = np.array(X_transformer) # turning the list into a numpy array
@@ -159,13 +159,13 @@ transformer_model = Sequential([ # grouping layers into a model with Sequential,
     Dropout(0.2), # first dropout rate
     LSTM(32, return_sequences = False), # second Long-Short Term Memory approach
     Dropout(0.2), # second dropout rate
-    Dense(1, activation='sigmoid') # the output is a single value, try to see what happens if you change sigmoid with classification
+    Dense(1, activation = 'sigmoid') # the output is a single value, try to see what happens if you change sigmoid with classification
 ])
 
 transformer_model.compile(optimizer = 'adam', loss = 'mean_squared_error') # compiling with adam optimizer and mean-squared error loss
-res = transformer_model.fit(X_train_transformer, y_train_transformer, 
+res = transformer_model.fit(X_train_transformer, y_train_transformer, # fitting the model on the testing part of the dataframes
                             epochs = 20, batch_size = 16, 
-                            validation_data=(X_test_transformer, y_test_transformer)) # fitting the model on the testing part of the dataframes
+                            validation_data = (X_test_transformer, y_test_transformer)) # validation part (IS THIS REALLY NEEDED HERE?)
 
 forecasts = transformer_model.predict(X_test_transformer) # we can eventually check the forecasts on the testing part of the x variables
 rmse = np.sqrt(mean_squared_error(y_test_transformer, forecasts)) # calculating root mean squared error as error measure between testing part of returns and forecasts
