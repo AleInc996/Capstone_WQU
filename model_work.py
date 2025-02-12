@@ -17,6 +17,9 @@ from sklearn.model_selection import train_test_split
 import yfinance as yf
 from datetime import datetime
 from sklearn.metrics import mean_squared_error
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Layer, LayerNormalization, GlobalAveragePooling1D, Embedding
 
 ### 1. Data preparation and manipulation
 
@@ -120,7 +123,7 @@ print(roc_indicator)
 
 # %%
 
-### 2. Training Momentum Transformer model
+### 2. Training Momentum Transformer model development
 
 correlation_dataset = correlation_dataset.dropna() # dropping the first NAs due to rolling window
 spy_rets_training = correlation_dataset['SPY returns'] # identifying the historical SPY returns for training
@@ -132,44 +135,135 @@ roc_indicator_training = ROC(vix_slope_training).dropna() # computing roc indica
 roc_indicator_training.replace([np.inf, -np.inf], np.nan, inplace = True) # replacing infinite values with nan, as there are a couple of zeros in the slope columns which generate inf
 roc_indicator_training.dropna(inplace = True) # dropping again rows with nan values
 
-transformer_train_data = pd.DataFrame({ # combining historical vix slope and SPY returns data for training
+
+## first, we are going to check results with a double LSTM, as normally momentum transformer replaces LSTM because of vanishing gradients
+doubleLSTM_train_data = pd.DataFrame({ # combining historical vix slope and SPY returns data for training
     'Historical VIX futures slope': vix_slope_training,
     'Stock Returns': spy_rets_training
 }).dropna()
 
-scaler_transformer = StandardScaler() # activating the scaler for standardizing the two variables
-scaled_features_transformer = scaler_transformer.fit_transform(transformer_train_data) # standardizing
+scaler_doubleLSTM = StandardScaler() # activating the scaler for standardizing the two variables
+scaled_features_doubleLSTM = scaler_doubleLSTM.fit_transform(doubleLSTM_train_data) # standardizing
 
-X_transformer, y_transformer = [], [] # pre-allocating memory for appending standardized values
+X_doubleLSTM, y_doubleLSTM = [], [] # pre-allocating memory for appending standardized values
 sequence_length = 5 # instead of considering single data points, deciding for the length of a sequence of consecutive observations to fed the model with, in order to try to capture temporal dependencies
 
-for i in range(sequence_length, len(scaled_features_transformer)): # appending
-    X_transformer.append(scaled_features_transformer[i-sequence_length:i]) # TAKE VIX_SLOPE AND NOT SCALED_FEATURES???
-    y_transformer.append(spy_rets_training.iloc[i])
+for i in range(sequence_length, len(scaled_features_doubleLSTM)): # appending
+    X_doubleLSTM.append(scaled_features_doubleLSTM[i-sequence_length:i]) # TAKE VIX_SLOPE AND NOT SCALED_FEATURES???
+    y_doubleLSTM.append(spy_rets_training.iloc[i])
 
-X_transformer = np.array(X_transformer) # turning the list into a numpy array
-y_transformer = np.array(y_transformer) # turning the list into a numpy array
+X_doubleLSTM = np.array(X_doubleLSTM) # turning the list into a numpy array
+y_doubleLSTM = np.array(y_doubleLSTM) # turning the list into a numpy array
 
-X_train_transformer, X_test_transformer, y_train_transformer, y_test_transformer = train_test_split(
-    X_transformer, y_transformer, test_size = 0.2, random_state = 42
+X_train_doubleLSTM, X_test_doubleLSTM, y_train_doubleLSTM, y_test_doubleLSTM = train_test_split(
+    X_doubleLSTM, y_doubleLSTM, test_size = 0.2, random_state = 42
 ) # training-testing dataframes split, for now going with 80/20
 
-transformer_model = Sequential([ # grouping layers into a model with Sequential, so that we have one output for each input in a layer
-    LSTM(64, input_shape = (X_transformer.shape[1], X_transformer.shape[2]), return_sequences = True), # first Long-Short Term Memory approach
+doubleLSTM_model = Sequential([ # grouping layers into a model with Sequential, so that we have one output for each input in a layer
+    LSTM(64, input_shape = (X_doubleLSTM.shape[1], X_doubleLSTM.shape[2]), return_sequences = True), # first Long-Short Term Memory approach
     Dropout(0.2), # first dropout rate
     LSTM(32, return_sequences = False), # second Long-Short Term Memory approach
     Dropout(0.2), # second dropout rate
     Dense(1, activation = 'sigmoid') # the output is a single value, try to see what happens if you change sigmoid with classification
 ])
 
-transformer_model.compile(optimizer = 'adam', loss = 'mean_squared_error') # compiling with adam optimizer and mean-squared error loss
-res = transformer_model.fit(X_train_transformer, y_train_transformer, # fitting the model on the testing part of the dataframes
+doubleLSTM_model.compile(optimizer = 'adam', loss = 'mean_squared_error') # compiling with adam optimizer and mean-squared error loss
+res = doubleLSTM_model.fit(X_train_doubleLSTM, y_train_doubleLSTM, # fitting the model on the testing part of the dataframes
                             epochs = 20, batch_size = 16, 
-                            validation_data = (X_test_transformer, y_test_transformer)) # validation part (IS THIS REALLY NEEDED HERE?)
+                            validation_data = (X_test_doubleLSTM, y_test_doubleLSTM)) # validation part (IS THIS REALLY NEEDED HERE?)
 
-forecasts = transformer_model.predict(X_test_transformer) # we can eventually check the forecasts on the testing part of the x variables
-rmse = np.sqrt(mean_squared_error(y_test_transformer, forecasts)) # calculating root mean squared error as error measure between testing part of returns and forecasts
-print(rmse)
+forecasts_doubleLSTM = doubleLSTM_model.predict(X_test_doubleLSTM) # we can eventually check the forecasts on the testing part of the x variables
+rmse_doubleLSTM = np.sqrt(mean_squared_error(y_test_doubleLSTM, forecasts_doubleLSTM)) # calculating root mean squared error as error measure between testing part of returns and forecasts
+print("Double LSTM RMSE:", rmse_doubleLSTM)
+
+
+## Building the proper Momentum Transformer model
+
+spy_rets_training = correlation_dataset['SPY returns'] # identifying the historical SPY returns for training
+vix_slope_training = correlation_dataset['vix_slope'] # identifying the historical VIX slope for training
+
+class transformer_core(Layer): # main class for the transformer model
+    def __init__(self, embed_dim, num_heads, ff_dim, rate = 0.1):
+        super(transformer_core, self).__init__()
+        self.att = tf.keras.layers.MultiHeadAttention(num_heads = num_heads, key_dim = embed_dim) # applying self-attention mechanism over the input sequence
+        self.ffn = tf.keras.Sequential([ # after self-attention mechanism, two dense layers are used to process each token in an isolated way
+            Dense(ff_dim, activation = 'relu'), # ReLu activation function  
+            Dense(embed_dim),
+        ])
+        self.layernorm1 = LayerNormalization(epsilon = 1e-6) # the input is normalized so that the training is faster and more stable
+        self.layernorm2 = LayerNormalization(epsilon = 1e-6) # done for both layers
+        self.dropout1 = Dropout(rate) # first dropout rate
+        self.dropout2 = Dropout(rate) # second dropout rate
+
+    def call(self, inputs, training): # here we define a class for designing how the input is fed to the layers
+        attn_output = self.att(inputs, inputs) # self-attention
+        attn_output = self.dropout1(attn_output, training = training) # the dropout makes the neurons alive in a random fashion
+        out1 = self.layernorm1(inputs + attn_output) # as well as inputs, here we normalize the output
+        ffn_output = self.ffn(out1) # transforming the normalized output
+        ffn_output = self.dropout2(ffn_output, training = training)
+        return self.layernorm2(out1 + ffn_output)
+    
+class positionalencoding(Layer): # defining another class for the positional encoding step of the transformer
+    def __init__(self, sequence_length, embed_dim):
+        super(positionalencoding, self).__init__()
+        self.pos_encoding = self.positional_encoding(sequence_length, embed_dim) # the positional encoding will learn temporal dependencies with the length of sequence for input data that we decided
+
+    def get_angles(self, pos, i, d_model): # defining a function to calculate sin and cosin of the angle
+        angle_degree = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
+        return pos * angle_degree
+
+    def positional_encoding(self, position, d_model): # here we define a function for proper positional encoding, which takes as inputs the maximum length of a sequence (position) and the dimension of each embedding (d_model)
+        angle_rads = self.get_angles(np.arange(position)[:, np.newaxis], # creating an array of integers showing the positions in the sequence
+                                     np.arange(d_model)[np.newaxis, :], # creating an array for the dimensions of the embeddings
+                                     d_model) 
+        angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2]) # applying the sine function to all columns with an even number
+        angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2]) # applying the cosine function to all columns with an odd number
+        return tf.cast(angle_rads[np.newaxis, ...], dtype=tf.float32)
+
+    def call(self, inputs): # defining a function to add everything built in the positional encoding to the initial input data
+        return inputs + self.pos_encoding[:, :tf.shape(inputs)[1], :]
+    
+def momentum_transformer(sequence_length, feature_dim): # defining a function for a transformer based neural network, that takes as inputs the window size and the features
+    embed_dim = 32  # setting the size of embedding dimensions for each token
+    num_heads = 4  # setting the number of heads in the multi-head attention mechanism
+    ff_dim = 128  # setting the number of hidden neurons for the feed forward network
+    inputs = Input(shape = (sequence_length, feature_dim)) # storing memory for input data, where the shape is given by the length of each sequence and the feature dimension
+    x = Dense(embed_dim)(inputs) # fully connected (dense) layer is applied to transform the input features into a higher-dimensional space of size given by the embedding dimension
+    x = positionalencoding(sequence_length, embed_dim)(x) # applying positional encoding to the inputs
+    x = transformer_core(embed_dim, num_heads, ff_dim)(x, training = True) # launching the core transformer class
+    x = GlobalAveragePooling1D()(x) # computing the mean across for all points in time for future dimension, after this the sequence becomes a single vector
+    x = Dropout(0.1)(x) # applying dropout, here with a probability of 10% to prevent overfitting (it means that 10% of the elements in x are being put equal to zero)
+    x = Dense(20, activation = 'relu')(x) # applying a dense layer with 20 neurons and ReLu activation function
+    x = Dropout(0.1)(x) # a second dropout rate is applied, again 10%
+    outputs = Dense(1, activation = 'sigmoid')(x) # the last dense layer for output is applied with 1 neuron and sigmoid activation function
+    model = Model(inputs = inputs, outputs = outputs) # creating a model object, using the defined inputs and outputs
+    model.compile(optimizer = 'adam', loss = 'mean_squared_error') # compiling the model, using adam optimizer and mean squared error as a loss measure, also to compare with double LSTM approach
+    return model
+
+sequence_length = 5 # the length of the sequence is set the same as for double LSTM approach
+scaler_transformer = StandardScaler() # activating standard scaler
+transformed_data = scaler_transformer.fit_transform(pd.DataFrame({ # grouping the vix slope and spy rets data together, as before
+    'Historical VIX futures slope': vix_slope_training,
+    'Stock Returns': spy_rets_training
+}).dropna()) # dropping NAs
+
+X_transformer, y_transformer = [], [] # as before, pre-allocating memory for x and y dataframes
+for i in range(sequence_length, len(transformed_data)): # as before, appending data using the length of sequence
+    X_transformer.append(transformed_data[i-sequence_length:i])
+    y_transformer.append(spy_rets_training.iloc[i])
+
+X_transformer = np.array(X_transformer) # turning into a numpy array
+y_transformer = np.array(y_transformer) # turning into a numpy array
+
+X_train_transformer, X_test_transformer, y_train_transformer, y_test_transformer = train_test_split(
+    X_transformer, y_transformer, test_size = 0.2, random_state = 42) # same type of split
+
+transformer_model = momentum_transformer(sequence_length, X_transformer.shape[2]) # running the momentum transformer model
+transformer_model.fit(X_train_transformer, y_train_transformer, epochs = 20, batch_size = 16, validation_data = (X_test_transformer, y_test_transformer)) # fitting the momentum transformer on training data and validating
+
+forecasts_transformer = transformer_model.predict(X_test_transformer) # predicting forecasts using testing data of the vix slope
+rmse_transformer = np.sqrt(mean_squared_error(y_test_transformer, forecasts_transformer)) # computing mean-squared error
+print("Transformer RMSE:", rmse_transformer)
 
 # %%
 
