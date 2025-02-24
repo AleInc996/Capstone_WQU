@@ -24,7 +24,9 @@ from tensorflow.keras.layers import Input, Layer, LayerNormalization, GlobalAver
 ### 1. Data preparation and manipulation
 
 # downloading monthly prices of the SPY ETF, as VIX data will be monthly and therefore we keep returns as monthly
-spy_prices = yf.download('SPY', start = '2005-07-01', end = '2024-12-31', interval = '1mo') # starting since when we have availability for the VIX futures historical term structure
+spy_prices = yf.download('SPY', start = '2005-07-01', end = '2024-12-31', interval = '1mo', multi_level_index = False, auto_adjust = False) # starting since when we have availability for the VIX futures historical term structure
+#if isinstance(spy_prices.columns, pd.MultiIndex):
+    #spy_prices = spy_prices.xs(key="SPY", axis=1, level=1)
 spy_prices = spy_prices['Adj Close'] # taking only adjusted close prices
 
 spy_rets = spy_prices.pct_change().dropna() # computing returns and dropping NAs (most importantly, dropping the first observation)
@@ -177,8 +179,7 @@ rmse_doubleLSTM = np.sqrt(mean_squared_error(y_test_doubleLSTM, forecasts_double
 print("Double LSTM RMSE:", rmse_doubleLSTM)
 
 
-## Building the proper Momentum Transformer model
-
+## building the proper Momentum Transformer model
 spy_rets_training = correlation_dataset['SPY returns'] # identifying the historical SPY returns for training
 vix_slope_training = correlation_dataset['vix_slope'] # identifying the historical VIX slope for training
 
@@ -275,10 +276,61 @@ print("Transformer RMSE:", rmse_transformer)
 
 spy_prices_pred_2025 = pd.read_excel('spy_pred_2025.xlsx') # uploading predicted prices of SPY for 2025
 spy_prices_pred_2025 = spy_prices_pred_2025[['Month', 'Close']] # taking only the month and the close prices
+spy_prices_pred_2025 = spy_prices_pred_2025[:-3]
 
 forward_vix_slope = constant_maturity_ahead[['Period', 'vix_slope']] # storing the ahead vix slope in a new variable
-forward_vix_slope = constant_maturity_ahead['vix_slope'] # storing the ahead vix slope in a new variable
+forward_vix_slope = forward_vix_slope.dropna().reset_index(drop = True)
 
+# Generate initial alpha (momentum probabilities) using the Transformer model
+sequence_length = 5 # the length of the sequence is set the same as for double LSTM approach
+
+transformer_data = pd.DataFrame({ # grouping the vix slope and spy rets data together, as before
+    '2025 VIX futures slope': forward_vix_slope['vix_slope'],
+    'Stock Returns': spy_prices_pred_2025['Close']
+}).dropna() # dropping NAs
+
+X_pred_transformer, y_pred_transformer = [], [] # as before, pre-allocating memory for x and y dataframes
+for i in range(sequence_length, len(transformer_data)): # as before, appending data using the length of sequence
+    X_pred_transformer.append(transformer_data[i-sequence_length:i])
+    y_pred_transformer.append(spy_prices_pred_2025.iloc[i])
+
+X_pred_transformer = np.array(X_pred_transformer) # turning into a numpy array
+y_pred_transformer = np.array(y_pred_transformer) # turning into a numpy array
+initial_alpha = transformer_model.predict(X_pred_transformer).flatten()
+
+# Define momentum and mean-reversion trading signals based on alpha
+def momentum_signal(vix_slope):
+    return np.sign(vix_slope)
+
+def mean_reversion_signal(stock_returns):
+    return -np.sign(stock_returns)
+
+# Compute initial trading signals (before adjustment) - the problem is that we have initial alpha with 3 and the slope with 8 obs
+momentum_component = initial_alpha * momentum_signal(forward_vix_slope['vix_slope']) 
+mean_reversion_component = (1 - initial_alpha) * mean_reversion_signal(spy_rets.iloc[-len(forward_vix_slope):])
+initial_trading_signal = momentum_component + mean_reversion_component
+
+# Backtest the initial strategy
+def backtest_trading_signals(signals, stock_prices):
+    daily_returns = stock_prices.pct_change().dropna()
+    strategy_returns = signals.shift(1).fillna(0) * daily_returns
+    cumulative_returns = (1 + strategy_returns).cumprod()
+    return cumulative_returns
+
+# Load 2025 stock prices for backtesting
+stock_prices_2025 = pd.read_csv('SPY_2025_prices.csv', index_col='Date', parse_dates=True)['Adj Close']
+initial_results = backtest_trading_signals(pd.Series(initial_trading_signal, index=stock_prices_2025.index), stock_prices_2025)
+
+# Plot initial cumulative returns (using matplotlib or other visualization library)
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(12, 6))
+plt.plot(initial_results, label='Initial Strategy Cumulative Returns')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Returns')
+plt.title('Initial Momentum Transformer Strategy Backtest')
+plt.legend()
+plt.show()
 
 
 
