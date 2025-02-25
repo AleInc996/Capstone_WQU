@@ -20,6 +20,8 @@ from sklearn.metrics import mean_squared_error
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Layer, LayerNormalization, GlobalAveragePooling1D, Embedding
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 ### 1. Data preparation and manipulation
 
@@ -276,70 +278,85 @@ print("Transformer RMSE:", rmse_transformer)
 
 spy_prices_pred_2025 = pd.read_excel('spy_pred_2025.xlsx') # uploading predicted prices of SPY for 2025
 spy_prices_pred_2025 = spy_prices_pred_2025[['Month', 'Close']] # taking only the month and the close prices
-spy_prices_pred_2025 = spy_prices_pred_2025[:-3]
+spy_prices_pred_2025 = spy_prices_pred_2025[:-3] # removing October, November and December 2025 to align with VIX futures data
 
 forward_vix_slope = constant_maturity_ahead[['Period', 'vix_slope']] # storing the ahead vix slope in a new variable
-forward_vix_slope = forward_vix_slope.dropna().reset_index(drop = True)
-
-# Generate initial alpha (momentum probabilities) using the Transformer model
+forward_vix_slope = forward_vix_slope.dropna().reset_index(drop = True) # dropping NAs and resetting index as it does not start from 0
 
 transformer_data = pd.DataFrame({ # grouping the vix slope and spy rets data together, as before
     '2025 VIX futures slope': forward_vix_slope['vix_slope'],
     'Stock Returns': spy_prices_pred_2025['Close']
 }).dropna() # dropping NAs
 
-transformer_data = np.array(transformer_data)
+transformer_data = np.array(transformer_data) # turning the dataframe into a numpy array, as it is needed by the transformer model
 
-# Number of observations, timesteps, and features
-num_obs = 8
-timesteps = 5
-features = 2
+# now the vix slope variable needs to be transformed into an array of shape similar to the one used for train
+# therefore I am setting the final parameters I want:
+num_obs = 8 # Number of observations (because we have 8 observations for the 2025 forward VIX futures slope)
+timesteps = 5 # sequence used to train the model
+features = 2 # variables 
 
-# Repeat values while ensuring each appears at least once
-transformer_expanded_data = np.zeros((num_obs, timesteps, features))
+transformer_expanded_data = np.zeros((num_obs, timesteps, features))# storing memory for the expanded data
 
-for i in range(num_obs):
+for i in range(num_obs): # expanding the data repeating values but making sure that each value appears at least once
     for t in range(timesteps):
         transformer_expanded_data[i, t] = transformer_data[(i + t) % num_obs]
 
-initial_alpha = transformer_model.predict(transformer_expanded_data).flatten()
+initial_mom_prob = transformer_model.predict(transformer_expanded_data).flatten() # creating initial momentum probabilities using the trained transformer model
 
-# Define momentum and mean-reversion trading signals based on alpha
-def momentum_signal(vix_slope): # check the signs between the functions???
-    return np.sign(vix_slope)
+def momentum_signal(vix_slope): # defining a function for the momentum signal
+    return np.sign(vix_slope)  # momentum signal is activated when VIX future slope is decreasing (contango steepening)
 
-def mean_reversion_signal(stock_returns):
-    return np.sign(stock_returns)
+def mean_reversion_signal(stock_returns): # defining a function for the mean reversion signal
+    return -np.sign(stock_returns)  # mean reversion signal is activated when returns are extreme
 
-# Compute initial trading signals (before adjustment)
-momentum_component = initial_alpha * momentum_signal(forward_vix_slope['vix_slope']) 
-mean_reversion_component = (1 - initial_alpha) * mean_reversion_signal(spy_prices_pred_2025['Close'])
-initial_trading_signal = momentum_component + mean_reversion_component
+# generating trading signals
+momentum_component = initial_mom_prob * momentum_signal(forward_vix_slope['vix_slope']) # momentum signals are given by the momentum probabilities multiplied by whether the vix slope gives us momentum vibes
+mean_reversion_component = (1 - initial_mom_prob) * mean_reversion_signal(spy_prices_pred_2025['Close'].pct_change()) # mean reversion signals are given by the momentum probabilities multiplied by whether the returns give us mean reversion vibes
+trading_signal = momentum_component + mean_reversion_component # summing
 
-# Backtest the initial strategy
-def backtest_trading_signals(signals, stock_prices):
-    daily_returns = stock_prices.pct_change().dropna()
-    strategy_returns = signals.shift(1).fillna(0) * daily_returns
-    cumulative_returns = (1 + strategy_returns).cumprod()
-    return cumulative_returns
+strategy_type = np.where(momentum_component > mean_reversion_component, "Momentum", "Mean Reversion") # showing the active strategy at each time step
 
-initial_results = backtest_trading_signals(pd.Series(initial_trading_signal, index=spy_prices_pred_2025.index), spy_prices_pred_2025['Close'])
+def backtest_trading_signals(signals, stock_prices, initial_capital = 1000): # function for an initial backtest with a simulated initial capital of 1,000 euro
+    monthly_returns = stock_prices.pct_change().fillna(0) # monthly returns are calculated as percentage difference
+    #strategy_returns = signals * daily_returns
+    strategy_returns = signals.shift(1).fillna(0) * monthly_returns  # shift to avoid lookahead bias
+    cumulative_returns = (1 + strategy_returns).cumprod() # cumulative multiplication of returns
+    portfolio_value = initial_capital * cumulative_returns  # portfolio evolution over time
+    return portfolio_value, strategy_returns
 
-# Plot initial cumulative returns (using matplotlib or other visualization library)
-import matplotlib.pyplot as plt
+# running backtest on the trading signal previously generated and the spy predicted prices for 2025
+portfolio_value, strategy_returns = backtest_trading_signals(pd.Series(trading_signal, index = spy_prices_pred_2025.index), 
+                                                              spy_prices_pred_2025['Close'])
 
-plt.figure(figsize=(12, 6))
-plt.plot(initial_results, label='Initial Strategy Cumulative Returns')
+results_df = pd.DataFrame({ # grouping everything into a dataframe to show strategy switches and returns
+    'Date': forward_vix_slope['Period'], # we take the months from the forward vix slope dataframe
+    'SPY Price': spy_prices_pred_2025['Close'], # SPY prices forecasted for 2025
+    'VIX Slope': forward_vix_slope['vix_slope'], # forward VIX futures term structure slope
+    'Trading Signal': trading_signal, # trading signal previously generated
+    'Active Strategy': strategy_type, # switches between momentum and mean reversion
+    'Daily Strategy Return': strategy_returns
+})
+results_df.set_index('Date', inplace = True)
+
+# plotting portfolio value over the next 7/8 months
+plt.figure(figsize = (12, 6))
+plt.plot(forward_vix_slope['Period'], portfolio_value, label = 'Portfolio value evolution', color = 'blue')
 plt.xlabel('Date')
-plt.ylabel('Cumulative Returns')
-plt.title('Initial Momentum Transformer Strategy Backtest')
+plt.ylabel('Portfolio Value')
+plt.title('Portfolio value evolution - Momentum vs. Mean Reversion')
 plt.legend()
 plt.show()
 
+plt.figure(figsize = (12, 6)) # plotting the table with strategy selection
+sns.heatmap(pd.DataFrame(strategy_type, index = forward_vix_slope['Period'], columns = ['Strategy']).T == "Momentum", 
+            cmap = ['red', 'green'], cbar = False)
+plt.title("Evolution of strategy selection (Green = Momentum, Red = Mean Reversion)")
+plt.show()
 
+print(results_df.head(20))  # displaying first 20 rows of strategy and returns
 
 
 # %%
 
 ### 4. Backtesting
-
