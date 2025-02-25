@@ -282,32 +282,38 @@ forward_vix_slope = constant_maturity_ahead[['Period', 'vix_slope']] # storing t
 forward_vix_slope = forward_vix_slope.dropna().reset_index(drop = True)
 
 # Generate initial alpha (momentum probabilities) using the Transformer model
-sequence_length = 5 # the length of the sequence is set the same as for double LSTM approach
 
 transformer_data = pd.DataFrame({ # grouping the vix slope and spy rets data together, as before
     '2025 VIX futures slope': forward_vix_slope['vix_slope'],
     'Stock Returns': spy_prices_pred_2025['Close']
 }).dropna() # dropping NAs
 
-X_pred_transformer, y_pred_transformer = [], [] # as before, pre-allocating memory for x and y dataframes
-for i in range(sequence_length, len(transformer_data)): # as before, appending data using the length of sequence
-    X_pred_transformer.append(transformer_data[i-sequence_length:i])
-    y_pred_transformer.append(spy_prices_pred_2025.iloc[i])
+transformer_data = np.array(transformer_data)
 
-X_pred_transformer = np.array(X_pred_transformer) # turning into a numpy array
-y_pred_transformer = np.array(y_pred_transformer) # turning into a numpy array
-initial_alpha = transformer_model.predict(X_pred_transformer).flatten()
+# Number of observations, timesteps, and features
+num_obs = 8
+timesteps = 5
+features = 2
+
+# Repeat values while ensuring each appears at least once
+transformer_expanded_data = np.zeros((num_obs, timesteps, features))
+
+for i in range(num_obs):
+    for t in range(timesteps):
+        transformer_expanded_data[i, t] = transformer_data[(i + t) % num_obs]
+
+initial_alpha = transformer_model.predict(transformer_expanded_data).flatten()
 
 # Define momentum and mean-reversion trading signals based on alpha
-def momentum_signal(vix_slope):
+def momentum_signal(vix_slope): # check the signs between the functions???
     return np.sign(vix_slope)
 
 def mean_reversion_signal(stock_returns):
-    return -np.sign(stock_returns)
+    return np.sign(stock_returns)
 
-# Compute initial trading signals (before adjustment) - the problem is that we have initial alpha with 3 and the slope with 8 obs
+# Compute initial trading signals (before adjustment)
 momentum_component = initial_alpha * momentum_signal(forward_vix_slope['vix_slope']) 
-mean_reversion_component = (1 - initial_alpha) * mean_reversion_signal(spy_rets.iloc[-len(forward_vix_slope):])
+mean_reversion_component = (1 - initial_alpha) * mean_reversion_signal(spy_prices_pred_2025['Close'])
 initial_trading_signal = momentum_component + mean_reversion_component
 
 # Backtest the initial strategy
@@ -317,9 +323,7 @@ def backtest_trading_signals(signals, stock_prices):
     cumulative_returns = (1 + strategy_returns).cumprod()
     return cumulative_returns
 
-# Load 2025 stock prices for backtesting
-stock_prices_2025 = pd.read_csv('SPY_2025_prices.csv', index_col='Date', parse_dates=True)['Adj Close']
-initial_results = backtest_trading_signals(pd.Series(initial_trading_signal, index=stock_prices_2025.index), stock_prices_2025)
+initial_results = backtest_trading_signals(pd.Series(initial_trading_signal, index=spy_prices_pred_2025.index), spy_prices_pred_2025['Close'])
 
 # Plot initial cumulative returns (using matplotlib or other visualization library)
 import matplotlib.pyplot as plt
