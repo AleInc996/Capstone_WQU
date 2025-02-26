@@ -354,8 +354,6 @@ sns.heatmap(pd.DataFrame(strategy_type, index = forward_vix_slope['Period'], col
 plt.title("Evolution of strategy selection (Green = Momentum, Red = Mean Reversion)")
 plt.show()
 
-print(results_df.head(20))  # displaying first 20 rows of strategy and returns
-
 
 # %%
 
