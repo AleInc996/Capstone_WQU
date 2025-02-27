@@ -26,13 +26,13 @@ import matplotlib.pyplot as plt
 ### 1. Data preparation and manipulation
 
 # downloading monthly prices of the SPY ETF, as VIX data will be monthly and therefore we keep returns as monthly
-spy_prices = yf.download('SPY', start = '2005-07-01', end = '2024-12-31', interval = '1mo', multi_level_index = False, auto_adjust = False) # starting since when we have availability for the VIX futures historical term structure
+spy_prices_hist = yf.download('SPY', start = '2005-07-01', end = '2024-12-31', interval = '1mo', multi_level_index = False, auto_adjust = False) # starting since when we have availability for the VIX futures historical term structure
 #if isinstance(spy_prices.columns, pd.MultiIndex):
     #spy_prices = spy_prices.xs(key="SPY", axis=1, level=1)
-spy_prices = spy_prices['Adj Close'] # taking only adjusted close prices
+spy_prices_hist = spy_prices_hist['Adj Close'] # taking only adjusted close prices
 
-spy_rets = spy_prices.pct_change().dropna() # computing returns and dropping NAs (most importantly, dropping the first observation)
-spy_rets.rename('SPY returns', inplace = True) # renaming the column as now we have returns and not prices
+spy_rets_hist = spy_prices_hist.pct_change().dropna() # computing returns and dropping NAs (most importantly, dropping the first observation)
+spy_rets_hist.rename('SPY returns', inplace = True) # renaming the column as now we have returns and not prices
 
 vix_data_ahead = pd.read_excel('VIX_term_structure_20250117.xlsx', header = 0) # uploading VIX futures ahead term structure data
 vix_data_ahead = vix_data_ahead.drop(vix_data_ahead.index[0]) # removing first unnecessary row
@@ -110,10 +110,10 @@ constant_maturity_hist["vix_slope"] = constant_maturity_hist["Constant Maturity 
 
 # now the idea is to merge the historical VIX dataframe with returns from SPY, so that we have aligned data and we can compute correlation
 constant_maturity_hist = constant_maturity_hist.set_index('Period', drop = True) # setting the dates as index
-correlation_dataset = constant_maturity_hist.join(spy_rets, how = 'left') # adding the returns from SPY to the historical VIX dataframe
+correlation_dataset = constant_maturity_hist.join(spy_rets_hist, how = 'left') # adding the returns from SPY to the historical VIX dataframe
 correlation_dataset = correlation_dataset.drop(['Tenor', 'Ticker', 'Last Price', 'Days past', 'Constant Maturity Price'], axis = 1) # dropping unnecessary columns for correlation analysis
 
-vol_indicator = rolling_std(spy_rets, time_interval = 5).dropna() # calculating volatility indicator on the returns of SPY
+vol_indicator = rolling_std(spy_rets_hist, time_interval = 5).dropna() # calculating volatility indicator on the returns of SPY
 correlation_indicator = rolling_correlation(correlation_dataset['vix_slope'], correlation_dataset['SPY returns'], time_interval = 5).dropna() # computing correlation indicator between SPY returns and historical VIX slope
 roc_indicator = ROC(correlation_dataset['vix_slope']).dropna() # calculating rate of change of the historical VIX futures constant maturity term structure slope
 roc_indicator.replace([np.inf, -np.inf], np.nan, inplace = True) # replacing infinite values with nan, as there are a couple of zeros in the slope columns which generate inf
@@ -143,7 +143,7 @@ roc_indicator_training.dropna(inplace = True) # dropping again rows with nan val
 ## first, we are going to check results with a double LSTM, as normally momentum transformer replaces LSTM because of vanishing gradients
 doubleLSTM_train_data = pd.DataFrame({ # combining historical vix slope and SPY returns data for training
     'Historical VIX futures slope': vix_slope_training,
-    'Stock Returns': spy_rets_training
+    'Historical SPY Returns': spy_rets_training
 }).dropna()
 
 scaler_doubleLSTM = StandardScaler() # activating the scaler for standardizing the two variables
@@ -153,7 +153,7 @@ X_doubleLSTM, y_doubleLSTM = [], [] # pre-allocating memory for appending standa
 sequence_length = 5 # instead of considering single data points, deciding for the length of a sequence of consecutive observations to fed the model with, in order to try to capture temporal dependencies
 
 for i in range(sequence_length, len(scaled_features_doubleLSTM)): # appending
-    X_doubleLSTM.append(scaled_features_doubleLSTM[i-sequence_length:i]) # TAKE VIX_SLOPE AND NOT SCALED_FEATURES???
+    X_doubleLSTM.append(scaled_features_doubleLSTM[i-sequence_length:i]) 
     y_doubleLSTM.append(spy_rets_training.iloc[i])
 
 X_doubleLSTM = np.array(X_doubleLSTM) # turning the list into a numpy array
@@ -247,7 +247,7 @@ sequence_length = 5 # the length of the sequence is set the same as for double L
 scaler_transformer = StandardScaler() # activating standard scaler
 transformed_data = scaler_transformer.fit_transform(pd.DataFrame({ # grouping the vix slope and spy rets data together, as before
     'Historical VIX futures slope': vix_slope_training,
-    'Stock Returns': spy_rets_training
+    'Historical SPY Returns': spy_rets_training
 }).dropna()) # dropping NAs
 
 X_transformer, y_transformer = [], [] # as before, pre-allocating memory for x and y dataframes
@@ -285,7 +285,7 @@ forward_vix_slope = forward_vix_slope.dropna().reset_index(drop = True) # droppi
 
 transformer_data = pd.DataFrame({ # grouping the vix slope and spy rets data together, as before
     '2025 VIX futures slope': forward_vix_slope['vix_slope'],
-    'Stock Returns': spy_prices_pred_2025['Close']
+    '2025 SPY Prices': spy_prices_pred_2025['Close']
 }).dropna() # dropping NAs
 
 transformer_data = np.array(transformer_data) # turning the dataframe into a numpy array, as it is needed by the transformer model
@@ -319,7 +319,6 @@ strategy_type = np.where(momentum_component > mean_reversion_component, "Momentu
 
 def backtest_trading_signals(signals, stock_prices, initial_capital = 1000): # function for an initial backtest with a simulated initial capital of 1,000 euro
     monthly_returns = stock_prices.pct_change().fillna(0) # monthly returns are calculated as percentage difference
-    #strategy_returns = signals * daily_returns
     strategy_returns = signals.shift(1).fillna(0) * monthly_returns  # shift to avoid lookahead bias
     cumulative_returns = (1 + strategy_returns).cumprod() # cumulative multiplication of returns
     portfolio_value = initial_capital * cumulative_returns  # portfolio evolution over time
@@ -329,32 +328,216 @@ def backtest_trading_signals(signals, stock_prices, initial_capital = 1000): # f
 portfolio_value, strategy_returns = backtest_trading_signals(pd.Series(trading_signal, index = spy_prices_pred_2025.index), 
                                                               spy_prices_pred_2025['Close'])
 
-results_df = pd.DataFrame({ # grouping everything into a dataframe to show strategy switches and returns
+initial_results_df = pd.DataFrame({ # grouping everything into a dataframe to show strategy switches and returns
     'Date': forward_vix_slope['Period'], # we take the months from the forward vix slope dataframe
-    'SPY Price': spy_prices_pred_2025['Close'], # SPY prices forecasted for 2025
-    'VIX Slope': forward_vix_slope['vix_slope'], # forward VIX futures term structure slope
-    'Trading Signal': trading_signal, # trading signal previously generated
-    'Active Strategy': strategy_type, # switches between momentum and mean reversion
-    'Daily Strategy Return': strategy_returns
+    '2025 SPY prices': spy_prices_pred_2025['Close'], # SPY prices forecasted for 2025
+    '2025 VIX slope': forward_vix_slope['vix_slope'], # forward VIX futures term structure slope
+    'Trading signal': trading_signal, # trading signal previously generated
+    'Active strategy': strategy_type, # switches between momentum and mean reversion
+    'Daily strategy return': strategy_returns
 })
-results_df.set_index('Date', inplace = True)
+initial_results_df.set_index('Date', inplace = True) # setting dates as index
 
 # plotting portfolio value over the next 7/8 months
-plt.figure(figsize = (12, 6))
-plt.plot(forward_vix_slope['Period'], portfolio_value, label = 'Portfolio value evolution', color = 'blue')
-plt.xlabel('Date')
-plt.ylabel('Portfolio Value')
-plt.title('Portfolio value evolution - Momentum vs. Mean Reversion')
-plt.legend()
+plt.figure(figsize = (12, 6)) # size of the figure
+plt.plot(forward_vix_slope['Period'], portfolio_value, label = 'Portfolio value evolution', color = 'blue') 
+plt.xlabel('Date') # setting label of x-axis
+plt.ylabel('Portfolio Value') # setting label of y-axis
+plt.title('Portfolio value evolution - Momentum vs. Mean Reversion') # title of the plot
+plt.legend() # adding the legend
 plt.show()
 
 plt.figure(figsize = (12, 6)) # plotting the table with strategy selection
-sns.heatmap(pd.DataFrame(strategy_type, index = forward_vix_slope['Period'], columns = ['Strategy']).T == "Momentum", 
-            cmap = ['red', 'green'], cbar = False)
-plt.title("Evolution of strategy selection (Green = Momentum, Red = Mean Reversion)")
+sns.heatmap(pd.DataFrame(strategy_type, index = spy_prices_pred_2025['Month'], columns = ['Strategy']).T == "Momentum", 
+            cmap = ['red', 'green'], cbar = False) # we are displaying the Strategy column of strategy_type variable
+plt.title("Evolution of strategy selection in 2025 (Green = Momentum, Red = Mean Reversion)") # title of the plot
 plt.show()
 
 
 # %%
 
-### 4. Backtesting
+### 4. Innovative double-check and Backtesting
+
+historical_df = correlation_dataset # storing historical data of vix slope and spy returns in a new dataframe only for ease of understanding with names of the variables
+df_2025 = pd.DataFrame({ # grouping the 2025 vix slope and spy rets data together, as before
+    '2025 VIX futures slope': forward_vix_slope['vix_slope'],
+    '2025 SPY prices': spy_prices_pred_2025['Close']
+}).dropna() # dropping NAs
+
+## following the same reasoning of the 3 functions initially created, we decided to 
+## compute rolling indicators but using an Exponentially Weighted Moving Average (EWMA),
+## in order to give more relevance to recent observations (volatility of 2024 is much more relevant than 2007 for predicting 2025)
+rolling_window = 5  # the idea is to reproduce initial functions with 5-day rolling window but with more weight on recent data
+
+vol_indicator_hist = historical_df['SPY returns'].ewm(span = rolling_window).std() # calculating historical rolling volatility indicator on the historical returns of SPY
+vol_indicator_2025 = df_2025['2025 SPY prices'].pct_change().ewm(span = rolling_window).std() # calculating rolling volatility indicator on the 2025 returns of SPY
+
+# the same for rolling correlation
+correlation_indicator_hist = historical_df['SPY returns'].ewm(span = rolling_window).corr(historical_df['vix_slope'])
+correlation_indicator_2025 = df_2025['2025 SPY prices'].pct_change().ewm(span = rolling_window).corr(df_2025['2025 VIX futures slope'])
+
+roc_indicator_hist = historical_df['vix_slope'].diff() # for the moment, we considered here to calculate rate of change (ROC) of VIX slope as absolute difference to avoid having inf and nan
+roc_indicator_2025 = df_2025['2025 VIX futures slope'].diff() # rate of change for 2025 vix slope
+
+volatility_mean = vol_indicator_hist.mean() # setting volatility threshold to assess if we should apply momentum or mean reversion
+
+# Determine confirmation signals based on thresholds
+def confirm_strategy(returns, vix_slope, vol, corr, roc):
+    conditions_momentum = (vol < volatility_mean) & (corr > 0.3) & (roc < 0)
+    conditions_mean_reversion = (vol > volatility_mean) & (corr < -0.3) & (roc > 0)
+    
+    strategy = np.where(conditions_momentum, 'Momentum',
+                np.where(conditions_mean_reversion, 'Mean Reversion', 'Momentum'))
+    return strategy
+
+# Determine confirmation signals based on thresholds
+def confirm_strategy(returns, vix_slope, vol, corr, roc):
+    # Favor Momentum if volatility is low
+    momentum_strong = (vol < volatility_mean)
+    momentum_confirmed = (momentum_strong & (corr > 0.3)) | (momentum_strong & (roc < 0))
+    
+    # Favor Mean Reversion if volatility is high
+    mean_reversion_strong = (vol > volatility_mean)
+    mean_reversion_confirmed = (mean_reversion_strong & (corr < -0.3)) | (mean_reversion_strong & (roc > 0))
+
+    # Assign strategy based on conditions
+    strategy = np.where(momentum_confirmed, 'Momentum',
+                np.where(mean_reversion_confirmed, 'Mean Reversion', 'Momentum'))  # Default to Momentum
+    
+    return strategy
+
+
+# Apply strategy confirmation
+strategy_2025 = confirm_strategy(df_2025['2025 SPY prices'], df_2025['2025 VIX futures slope'], vol_indicator_2025, correlation_indicator_2025, roc_indicator_2025)
+
+# Plot the results
+fig, ax = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+ax[0].plot(df_2025.index, portfolio_value, label='Portfolio Value', color='black')
+ax[0].set_title('Portfolio Value')
+ax[0].legend()
+
+ax[1].plot(df_2025.index, vol_indicator_2025, label='Rolling Volatility', color='blue')
+ax[1].axhline(volatility_mean, linestyle='--', color='red', label='Median Volatility')
+ax[1].set_title('Rolling Volatility')
+ax[1].legend()
+
+ax[2].plot(df_2025.index, correlation_indicator_2025, label='Rolling Correlation (SPY vs VIX Slope)', color='purple')
+ax[2].axhline(0.3, linestyle='--', color='green', label='Momentum Threshold')
+ax[2].axhline(-0.3, linestyle='--', color='red', label='Mean Reversion Threshold')
+ax[2].set_title('Rolling Correlation')
+ax[2].legend()
+
+ax[3].plot(df_2025.index, roc_indicator_2025, label='Rate of Change of VIX Slope', color='orange')
+ax[3].axhline(0, linestyle='--', color='black', label='Zero Line')
+ax[3].set_title('Rate of Change (ROC) of VIX Slope')
+ax[3].legend()
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+# Assuming strategy_type, forward_vix_slope, and other needed data are already available
+
+# Define thresholds based on historical data
+volatility_threshold = volatility_mean
+correlation_threshold_low = -0.3
+correlation_threshold_high = 0.3
+
+# Confirmation check based on the three indicators
+confirmation_check = []
+for i in range(len(vol_indicator_2025)):
+    if vol_indicator_2025[i] < volatility_threshold:
+        vol_signal = "Momentum"
+    else:
+        vol_signal = "Mean Reversion"
+    
+    if correlation_indicator_2025[i] < correlation_threshold_low:
+        corr_signal = "Mean Reversion"
+    elif correlation_indicator_2025[i] > correlation_threshold_high:
+        corr_signal = "Momentum"
+    else:
+        corr_signal = None  # Neutral case, doesn't strongly favor either
+    
+    if roc_indicator_2025[i] > 0:
+        roc_signal = "Mean Reversion"
+    else:
+        roc_signal = "Momentum"
+    
+    # Final confirmation check based on majority vote
+    signals = [vol_signal, corr_signal, roc_signal]
+    signals = [s for s in signals if s is not None]  # Remove neutral cases
+    
+    if signals.count("Momentum") > signals.count("Mean Reversion"):
+        confirmation_check.append("Momentum")
+    else:
+        confirmation_check.append("Mean Reversion")
+
+# Convert to DataFrame
+confirmation_check = pd.Series(confirmation_check, index=forward_vix_slope['Period'])
+
+# Compare with original strategy selection
+strategy_comparison = pd.DataFrame(strategy_type, index=forward_vix_slope['Period'], columns=['Strategy'])
+strategy_comparison['Confirmation'] = confirmation_check
+
+
+# Hybrid strategy selection combining transformer with confirmation indicators
+def hybrid_strategy_selection(transformer_signal, vol, corr, roc):
+    # Volatility is the primary factor
+    momentum_strong = vol < volatility_mean
+    mean_reversion_strong = vol > volatility_mean
+    
+    # Secondary confirmations
+    momentum_confirmed = momentum_strong & ((corr > 0.3) | (roc < 0))
+    mean_reversion_confirmed = mean_reversion_strong & ((corr < -0.3) | (roc > 0))
+
+    # Hybrid selection: Transformer signal + Confirmation
+    strategy = np.where(momentum_confirmed, 'Momentum',
+                np.where(mean_reversion_confirmed, 'Mean Reversion', transformer_signal))  # Default to transformer
+    
+    return strategy
+
+# Function to evaluate performance
+def evaluate_performance(cumulative_returns):
+    total_return = cumulative_returns.iloc[-1] - 1
+    annualized_return = (1 + total_return) ** (1 / (len(cumulative_returns) / 252)) - 1
+    max_drawdown = (cumulative_returns / cumulative_returns.cummax() - 1).min()
+    
+    print(f"Total Return: {total_return:.2%}")
+    print(f"Annualized Return: {annualized_return:.2%}")
+    print(f"Max Drawdown: {max_drawdown:.2%}")
+
+# Apply the hybrid strategy on 2025 data
+final_strategy = hybrid_strategy_selection(strategy_comparison['Strategy'], vol_indicator_2025, correlation_indicator_2025, roc_indicator_2025)
+
+def compute_portfolio_returns(strategy, returns):
+    """
+    Computes portfolio returns based on strategy selection.
+    - If 'Momentum', we assume we follow the market return.
+    - If 'Mean Reversion', we assume we take the opposite sign of returns.
+    """
+    portfolio_returns = np.where(strategy == 'Momentum', returns, -returns)
+    return pd.Series(portfolio_returns, index=returns.index)
+
+# Compute portfolio returns based on the final strategy
+final_portfolio_returns = compute_portfolio_returns(final_strategy, df_2025['2025 SPY prices'].pct_change())
+
+# Convert returns to cumulative returns
+final_cumulative_returns = (1 + final_portfolio_returns).cumprod()
+
+# Evaluate final strategy performance
+print("Final Strategy Performance:")
+evaluate_performance(final_cumulative_returns)
+
+plt.figure(figsize=(12, 6))
+plt.plot((1 + compute_portfolio_returns(strategy_comparison['Strategy'], df_2025['2025 SPY prices'].pct_change())).cumprod(), label="Momentum Transformer Only", linestyle='dashed')
+plt.plot(final_cumulative_returns, label="Hybrid Strategy (Transformer + Indicators)", linewidth=2)
+plt.legend()
+plt.title("Cumulative Returns: Transformer vs Hybrid Strategy")
+plt.xlabel("Date")
+plt.ylabel("Cumulative Return")
+plt.grid()
+plt.show()
