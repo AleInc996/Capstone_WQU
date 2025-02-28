@@ -180,6 +180,43 @@ forecasts_doubleLSTM = doubleLSTM_model.predict(X_test_doubleLSTM) # we can even
 rmse_doubleLSTM = np.sqrt(mean_squared_error(y_test_doubleLSTM, forecasts_doubleLSTM)) # calculating root mean squared error as error measure between testing part of returns and forecasts
 print("Double LSTM RMSE:", rmse_doubleLSTM)
 
+## why this double LSTM is still not enough?
+class GradientMonitor(tf.keras.callbacks.Callback): # defining a class to monitor the gradient norms of the double LSTM
+    def __init__(self, X_train, y_train): # we will obviously make use of the training sets of both x and y variables
+        super(GradientMonitor, self).__init__()
+        self.X_train = X_train # storing the variables for later use
+        self.y_train = y_train # the idea of this callback is to monitor and modify training behavior
+
+    def on_epoch_end(self, epoch, logs = None): # in our specific case, the callback is employed to check gradients after each epoch
+        sample_idx = np.random.randint(0, len(self.X_train), size = 16)  # selecting 16 random indices from the data
+        X_sample, y_sample = self.X_train[sample_idx], self.y_train[sample_idx] # small random batches of x and y are obtained
+
+        with tf.GradientTape() as tape: # recording all operations in one block to compute gradients
+            y_pred = self.model(X_sample, training = True)  # feeding the random batch to get predicted output
+            loss = self.model.compiled_loss(y_sample, y_pred)  # calculating the loss
+
+        gradients = tape.gradient(loss, self.model.trainable_variables)  # calculating gradients of the loss with respect to all trainable parameters of the model
+        gradient_norms = [tf.norm(g).numpy() for g in gradients if g is not None] # computing the norm of each gradient
+
+        avg_gradient_norm = np.mean(gradient_norms) # taking the average of gradient norms
+        max_gradient_norm = np.max(gradient_norms) # taking the maximum among gradient norms
+
+        print(f"Epoch {epoch+1}: Average gradient norm = {avg_gradient_norm:.6f}, Maximum gradient norm = {max_gradient_norm:.6f}")
+
+        if avg_gradient_norm < 1e-3: # checking for vanishing gradients
+            print("Warning: Potential vanishing gradients detected.")
+        if max_gradient_norm > 1e3: # checking for exploding gradients
+            print("Warning: Potential exploding gradients detected.")
+
+gradient_monitor = GradientMonitor(X_train_doubleLSTM, y_train_doubleLSTM) # the gradient monitoring process is appended to model training
+
+res = doubleLSTM_model.fit( # re-running the fit of the double LSTM model, this time adding the gradient monitor callback
+    X_train_doubleLSTM, y_train_doubleLSTM, 
+    epochs = 20, batch_size = 16, 
+    validation_data = (X_test_doubleLSTM, y_test_doubleLSTM),
+    callbacks = [gradient_monitor]
+)
+
 
 ## building the proper Momentum Transformer model
 spy_rets_training = correlation_dataset['SPY returns'] # identifying the historical SPY returns for training
@@ -292,7 +329,7 @@ transformer_data = np.array(transformer_data) # turning the dataframe into a num
 
 # now the vix slope variable needs to be transformed into an array of shape similar to the one used for train
 # therefore I am setting the final parameters I want:
-num_obs = 8 # Number of observations (because we have 8 observations for the 2025 forward VIX futures slope)
+num_obs = 8 # number of observations (because we have 8 observations for the 2025 forward VIX futures slope)
 timesteps = 5 # sequence used to train the model
 features = 2 # variables 
 
@@ -354,9 +391,78 @@ plt.title("Evolution of strategy selection in 2025 (Green = Momentum, Red = Mean
 plt.show()
 
 
+## does this really make sense? Let'see a proper backtesting, meaning how it would have behaved in the past
+transformer_data_hist = correlation_dataset # let's assign the historical dataset containing vix slope and spy returns to a new variable
+transformer_data_hist = transformer_data_hist.join(spy_prices_hist, how = 'left') # adding the prices from SPY to the historical dataframe
+transformer_data_hist.drop('SPY returns', axis = 1, inplace = True) # dropping the returns column as it is not needed now
+correlation_dataset = correlation_dataset.join(spy_prices_hist, how = 'left') # adding the prices from SPY to the historical dataframe
+correlation_dataset.drop('SPY returns', axis = 1, inplace = True) # we basically did the same for both these two variables, for ease of manipulation later
+
+transformer_data_hist = np.array(transformer_data_hist) # turning the dataframe into a numpy array, as it is needed by the transformer model
+
+# now the vix slope variable needs to be transformed into an array of shape similar to the one used for train
+# therefore I am setting the final parameters I want:
+num_obs = 166 # number of observations (because we have 166 observations from 2007 to 2024 for the historical VIX futures slope)
+timesteps = 5 # sequence used to train the model
+features = 2 # variables 
+
+transformer_expanded_data_hist = np.zeros((num_obs, timesteps, features)) # storing memory for the expanded data
+
+for i in range(num_obs): # expanding the data repeating values but making sure that each value appears at least once
+    for t in range(timesteps):
+        transformer_expanded_data_hist[i, t] = transformer_data_hist[(i + t) % num_obs]
+
+initial_mom_prob_hist = transformer_model.predict(transformer_expanded_data_hist).flatten() # creating initial momentum probabilities using the trained transformer model
+
+def momentum_signal(vix_slope): # defining a function for the momentum signal
+    return np.sign(vix_slope)  # momentum signal is activated when VIX future slope is decreasing (contango steepening)
+
+def mean_reversion_signal(stock_returns): # defining a function for the mean reversion signal
+    return -np.sign(stock_returns)  # mean reversion signal is activated when returns are extreme
+
+# generating trading signals
+momentum_component_hist = initial_mom_prob_hist * momentum_signal(correlation_dataset['vix_slope']) # momentum signals are given by the momentum probabilities multiplied by whether the vix slope gives us momentum vibes
+mean_reversion_component_hist = (1 - initial_mom_prob_hist) * mean_reversion_signal(correlation_dataset['Adj Close'].pct_change()) # mean reversion signals are given by the momentum probabilities multiplied by whether the returns give us mean reversion vibes
+trading_signal_hist = momentum_component_hist + mean_reversion_component_hist # summing
+
+strategy_type_hist = np.where(momentum_component_hist > mean_reversion_component_hist, "Momentum", "Mean Reversion") # showing the active strategy at each time step
+
+def backtest_trading_signals_hist(signals, stock_prices, initial_capital = 1000): # function for an initial backtest with a simulated initial capital of 1,000 euro
+    monthly_returns = stock_prices.pct_change().fillna(0) # monthly returns are calculated as percentage difference
+    strategy_returns = signals.shift(1).fillna(0) * monthly_returns  # shift to avoid lookahead bias
+    cumulative_returns = (1 + strategy_returns).cumprod() # cumulative multiplication of returns
+    portfolio_value = initial_capital * cumulative_returns  # portfolio evolution over time
+    return portfolio_value, strategy_returns
+
+# running backtest on the trading signal previously generated and the SPY historical prices
+portfolio_value_hist, strategy_returns_hist = backtest_trading_signals(pd.Series(trading_signal_hist, index = correlation_dataset.index), 
+                                                              correlation_dataset['Adj Close'])
+
+correlation_dataset.reset_index(drop = False, inplace = True) # separating the dates column as they are needed for the plot
+
+# plotting potential historical portfolio value over the last 17 years
+plt.figure(figsize = (12, 6)) # size of the figure
+plt.plot(correlation_dataset['Period'], portfolio_value_hist, label = 'Portfolio value evolution (2007-2024)', color = 'blue') 
+plt.xlabel('Date') # setting label of x-axis
+plt.ylabel('Portfolio Value') # setting label of y-axis
+plt.title('Portfolio value evolution (2007-2024) - Momentum vs. Mean Reversion') # title of the plot
+plt.legend() # adding the legend
+plt.show()
+
+plt.figure(figsize = (12, 6)) # plotting the table with strategy selection
+sns.heatmap(pd.DataFrame(strategy_type_hist, index = correlation_dataset['Period'], columns = ['Strategy']).T == "Momentum", 
+            cmap = ['red', 'green'], cbar = False) # we are displaying the Strategy column of strategy_type variable
+plt.title("Evolution of strategy selection 2007-2024 (Green = Momentum, Red = Mean Reversion)") # title of the plot
+plt.show()
+
+
 # %%
 
 ### 4. Innovative double-check and Backtesting
+
+correlation_dataset = constant_maturity_hist.join(spy_rets_hist, how = 'left') # retrieving initial dataframe
+correlation_dataset = correlation_dataset.drop(['Tenor', 'Ticker', 'Last Price', 'Days past', 'Constant Maturity Price'], axis = 1) # dropping unnecessary columns for correlation analysis
+correlation_dataset = correlation_dataset.dropna() # dropping the first NAs due to rolling window
 
 historical_df = correlation_dataset # storing historical data of vix slope and spy returns in a new dataframe only for ease of understanding with names of the variables
 df_2025 = pd.DataFrame({ # grouping the 2025 vix slope and spy rets data together, as before
@@ -399,7 +505,7 @@ strategy_2025 = confirmation_transformer_strategy( # running the strategy confir
 
 # displaying the results
 fig, ax = plt.subplots(4, 1, figsize = (12, 10), sharex = True) # dividing the whole plot into 4 subplots
-ax[0].plot(df_2025.index, portfolio_value, label = 'Portfolio Value', color = 'black') # showing portfolio value obtained in previous part of the code
+ax[0].plot(df_2025.index, portfolio_value, label = 'Portfolio Value 2025', color = 'black') # showing portfolio value obtained in previous part of the code
 ax[0].set_title('Portfolio Value') # title of first subplot
 ax[0].legend() # displaying elgend
 
@@ -501,7 +607,102 @@ plt.figure(figsize = (12, 6)) # plotting the momentum transformer strategy toget
 plt.plot((1 + compute_portfolio_returns(strategy_comparison['Strategy'], df_2025['2025 SPY prices'].pct_change())).cumprod(), label = "Momentum transformer Only", linestyle = 'dashed') # cumulative returns if using only momentum transformer
 plt.plot(final_cumulative_returns, label = "(Transformer + Indicators) strategy", linewidth = 2) # cumulative returns if using combined strategy
 plt.legend() # displaying legend
-plt.title("Cumulative returns: Transformer vs Combined Strategy") # title of the plot
+plt.title("Cumulative returns: Transformer vs combined strategy") # title of the plot
+plt.xlabel("Date") # x-axis are with dates
+plt.ylabel("Cumulative returns") # cumulative returns on the y-axis
+plt.grid()
+plt.show()
+
+
+## what would have happened in the past?
+correlation_dataset = correlation_dataset.join(spy_prices_hist, how = 'left') # adding back the historical prices of SPY
+
+strategy_hist = confirmation_transformer_strategy( # running the strategy confirmation function on historical data
+    correlation_dataset['Adj Close'], correlation_dataset['vix_slope'], vol_indicator_hist, correlation_indicator_hist, roc_indicator_hist)
+
+# displaying the results
+fig, ax = plt.subplots(4, 1, figsize = (12, 10), sharex = True) # dividing the whole plot into 4 subplots
+ax[0].plot(correlation_dataset.index, portfolio_value_hist, label = 'Portfolio Value (2007-2024)', color = 'black') # showing portfolio value obtained in previous part of the code
+ax[0].set_title('Portfolio Value') # title of first subplot
+ax[0].legend() # displaying elgend
+
+ax[1].plot(correlation_dataset.index, vol_indicator_hist, label = 'Rolling Volatility', color = 'red') # showing rolling volatility of historical SPY returns
+ax[1].axhline(volatility_mean, linestyle = '--', color = 'blue', label = 'Average Volatility (2007-2024)') # plotting also the volatility threshold
+ax[1].set_title('Rolling Volatility') # title of the second subplot
+ax[1].legend() # displaying legend
+
+ax[2].plot(correlation_dataset.index, correlation_indicator_hist, label = 'Rolling Correlation (SPY vs VIX Slope)', color = 'purple') # showing rolling correlation between SPY and VIX futures term structure slope
+ax[2].axhline(0.3, linestyle = '--', color = 'green', label = 'Momentum Threshold') # contextualizing correlation with the momentum threshold applied
+ax[2].axhline(-0.3, linestyle = '--', color = 'red', label = 'Mean Reversion Threshold') # contextualizing correlation with the mean reversion threshold applied
+ax[2].set_title('Rolling Correlation') # title of third subplot
+ax[2].legend() # displaying legend
+
+ax[3].plot(correlation_dataset.index, roc_indicator_hist, label = 'Rate of change - VIX futures term structure slope', color = 'orange') # showing ROC of VIX slope
+ax[3].axhline(0, linestyle = '--', color = 'black', label = 'Zero Line') # 0 is the threhsold selected
+ax[3].set_title('Rate of change (ROC) of VIX futures term structure slope') # title of the fourth subplot
+ax[3].legend() # displaying legend
+
+plt.tight_layout() # visual setting
+plt.show()
+
+volatility_threshold = volatility_mean # defining volatility threshold
+correlation_threshold_low = 0.3 # defining no correlation threshold (everything below 0.3 will be considered as not high enough correlation)
+correlation_threshold_high = 0.3 # defining correlation threshold (everything above 0.3 will be considered high enough correlation)
+
+confirmation_check_hist = [] # pre-allocating memory for the checks to confirm the strategies or eventually modify them
+for i in range(len(vol_indicator_hist)):
+    if vol_indicator_hist[i] < volatility_threshold: # lower than average volatility is considered as momentum signal
+        vol_signal = "Momentum"
+    else:
+        vol_signal = "Mean Reversion"
+    
+    if correlation_indicator_hist[i] >= correlation_threshold_low: # higher than 0.3 correlation is considered as momentum signal
+        corr_signal = "Momentum"
+    elif correlation_indicator_hist[i] < correlation_threshold_high: # lower than 0.3 correlation is considered as mean reversion signal
+        corr_signal = "Mean Reversion"
+    else:
+        corr_signal = None  # allowing for a neutral case
+    
+    if roc_indicator_hist[i] < 0: # a negative rate of change in the vix slope is associated to contango, therefore momentum signal
+        roc_signal = "Momentum"
+    else:
+        roc_signal = "Mean Reversion"
+    
+    signals = [vol_signal, corr_signal, roc_signal] # listing the signals coming from the three indicators
+    signals = [s for s in signals if s is not None]  # removing neutral cases
+    
+    if signals.count("Momentum") > signals.count("Mean Reversion"): # the confirmed strategy will simply be the one which has the majority of "votes"
+        confirmation_check_hist.append("Momentum")
+    else:
+        confirmation_check_hist.append("Mean Reversion")
+
+confirmation_check_hist = pd.Series(confirmation_check_hist, index = correlation_dataset.index) # converting the results to a dataframe for ease of manipulation
+
+strategy_comparison_hist = pd.DataFrame(strategy_type_hist, index = correlation_dataset.index, columns = ['Strategy']) # comparing checks with initial strategy identification
+strategy_comparison_hist['Confirmation/Double-check'] = confirmation_check_hist # appending the new strategy selections for comparison
+
+final_strategy_hist = dual_strategy_identification(strategy_comparison_hist['Strategy'], vol_indicator_hist, correlation_indicator_hist, roc_indicator_hist) # running the double strategy function on historical data
+
+final_portfolio_returns_hist = compute_portfolio_returns(final_strategy_hist, correlation_dataset['Adj Close'].pct_change()) # calculating portfolio returns based on the final strategy
+
+final_cumulative_returns_hist = (1 + final_portfolio_returns_hist).cumprod() # computing final cumulative returns
+
+print("Final Strategy Performance:")
+performance_assessment(final_cumulative_returns_hist) # assessing dual strategy performance
+
+plt.figure(figsize = (12, 6)) # plotting the momentum transformer strategy only
+plt.plot((1 + compute_portfolio_returns(strategy_comparison_hist['Strategy'], correlation_dataset['Adj Close'].pct_change())).cumprod(), label = "Momentum transformer Only", linestyle = 'dashed') # cumulative returns if using only momentum transformer
+plt.legend() # displaying legend
+plt.title("Cumulative returns: Momentum transformer only") # title of the plot
+plt.xlabel("Date") # x-axis are with dates
+plt.ylabel("Cumulative returns") # cumulative returns on the y-axis
+plt.grid()
+plt.show()
+
+plt.figure(figsize = (12, 6)) # plotting the the dual strategy
+plt.plot(final_cumulative_returns_hist * 1000, label = "(Transformer + Indicators) strategy", linewidth = 2) # cumulative returns if using combined strategy
+plt.legend() # displaying legend
+plt.title("Cumulative returns: Transformer + indicators strategy") # title of the plot
 plt.xlabel("Date") # x-axis are with dates
 plt.ylabel("Cumulative returns") # cumulative returns on the y-axis
 plt.grid()
