@@ -381,163 +381,128 @@ roc_indicator_2025 = df_2025['2025 VIX futures slope'].diff() # rate of change f
 
 volatility_mean = vol_indicator_hist.mean() # setting volatility threshold to assess if we should apply momentum or mean reversion
 
-# Determine confirmation signals based on thresholds
-def confirm_strategy(returns, vix_slope, vol, corr, roc):
-    conditions_momentum = (vol < volatility_mean) & (corr > 0.3) & (roc < 0)
-    conditions_mean_reversion = (vol > volatility_mean) & (corr < -0.3) & (roc > 0)
+## the idea now is to, somehow, confirm the strategies outputted by the momentum transformer model, using the three indicators
+def confirmation_transformer_strategy(returns, vix_slope, vol, corr, roc): # the function will take stock returns, VIX futures term structure slope and the 3 indicators as inputs
+    momentum_strong = (vol < volatility_mean) # if volatility now is low, it means we are in contango and momentum strategy should be preferred
+    momentum_confirmed = (momentum_strong & (corr >= 0.3)) | (momentum_strong & (roc < 0)) # after looking at volatility, another check can come from correlation and rate of change
     
-    strategy = np.where(conditions_momentum, 'Momentum',
-                np.where(conditions_mean_reversion, 'Mean Reversion', 'Momentum'))
-    return strategy
+    mean_reversion_strong = (vol > volatility_mean) # if volatility now is high, it means we are in backwardation, returns are extreme and mean reversion strategy should be preferred
+    mean_reversion_confirmed = (mean_reversion_strong & (corr < 0.3)) | (mean_reversion_strong & (roc > 0)) # after looking at volatility, another check can come from correlation and rate of change
 
-# Determine confirmation signals based on thresholds
-def confirm_strategy(returns, vix_slope, vol, corr, roc):
-    # Favor Momentum if volatility is low
-    momentum_strong = (vol < volatility_mean)
-    momentum_confirmed = (momentum_strong & (corr > 0.3)) | (momentum_strong & (roc < 0))
-    
-    # Favor Mean Reversion if volatility is high
-    mean_reversion_strong = (vol > volatility_mean)
-    mean_reversion_confirmed = (mean_reversion_strong & (corr < -0.3)) | (mean_reversion_strong & (roc > 0))
-
-    # Assign strategy based on conditions
-    strategy = np.where(momentum_confirmed, 'Momentum',
-                np.where(mean_reversion_confirmed, 'Mean Reversion', 'Momentum'))  # Default to Momentum
+    strategy = np.where(momentum_confirmed, 'Momentum', # associating a strategy to each month based on the previously defined conditions based on conditions
+                np.where(mean_reversion_confirmed, 'Mean Reversion', 'Hold'))  # if nothing happens, let's go for hold
     
     return strategy
 
+strategy_2025 = confirmation_transformer_strategy( # running the strategy confirmation function on 2025 data
+    df_2025['2025 SPY prices'], df_2025['2025 VIX futures slope'], vol_indicator_2025, correlation_indicator_2025, roc_indicator_2025)
 
-# Apply strategy confirmation
-strategy_2025 = confirm_strategy(df_2025['2025 SPY prices'], df_2025['2025 VIX futures slope'], vol_indicator_2025, correlation_indicator_2025, roc_indicator_2025)
+# displaying the results
+fig, ax = plt.subplots(4, 1, figsize = (12, 10), sharex = True) # dividing the whole plot into 4 subplots
+ax[0].plot(df_2025.index, portfolio_value, label = 'Portfolio Value', color = 'black') # showing portfolio value obtained in previous part of the code
+ax[0].set_title('Portfolio Value') # title of first subplot
+ax[0].legend() # displaying elgend
 
-# Plot the results
-fig, ax = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
-ax[0].plot(df_2025.index, portfolio_value, label='Portfolio Value', color='black')
-ax[0].set_title('Portfolio Value')
-ax[0].legend()
+ax[1].plot(df_2025.index, vol_indicator_2025, label = 'Rolling Volatility', color = 'red') # showing rolling volatility of 2025 SPY returns
+ax[1].axhline(volatility_mean, linestyle = '--', color = 'blue', label = 'Average Volatility (2007-2024)') # plotting also the volatility threshold
+ax[1].set_title('Rolling Volatility') # title of the second subplot
+ax[1].legend() # displaying legend
 
-ax[1].plot(df_2025.index, vol_indicator_2025, label='Rolling Volatility', color='blue')
-ax[1].axhline(volatility_mean, linestyle='--', color='red', label='Median Volatility')
-ax[1].set_title('Rolling Volatility')
-ax[1].legend()
+ax[2].plot(df_2025.index, correlation_indicator_2025, label = 'Rolling Correlation (SPY vs VIX Slope)', color = 'purple') # showing rolling correlation between SPY and VIX futures term structure slope
+ax[2].axhline(0.3, linestyle = '--', color = 'green', label = 'Momentum Threshold') # contextualizing correlation with the momentum threshold applied
+ax[2].axhline(-0.3, linestyle = '--', color = 'red', label = 'Mean Reversion Threshold') # contextualizing correlation with the mean reversion threshold applied
+ax[2].set_title('Rolling Correlation') # title of third subplot
+ax[2].legend() # displaying legend
 
-ax[2].plot(df_2025.index, correlation_indicator_2025, label='Rolling Correlation (SPY vs VIX Slope)', color='purple')
-ax[2].axhline(0.3, linestyle='--', color='green', label='Momentum Threshold')
-ax[2].axhline(-0.3, linestyle='--', color='red', label='Mean Reversion Threshold')
-ax[2].set_title('Rolling Correlation')
-ax[2].legend()
+ax[3].plot(df_2025.index, roc_indicator_2025, label = 'Rate of change - VIX futures term structure slope', color = 'orange') # showing ROC of VIX slope
+ax[3].axhline(0, linestyle = '--', color = 'black', label = 'Zero Line') # 0 is the threhsold selected
+ax[3].set_title('Rate of change (ROC) of VIX futures term structure slope') # title of the fourth subplot
+ax[3].legend() # displaying legend
 
-ax[3].plot(df_2025.index, roc_indicator_2025, label='Rate of Change of VIX Slope', color='orange')
-ax[3].axhline(0, linestyle='--', color='black', label='Zero Line')
-ax[3].set_title('Rate of Change (ROC) of VIX Slope')
-ax[3].legend()
-
-plt.tight_layout()
+plt.tight_layout() # visual setting
 plt.show()
 
+volatility_threshold = volatility_mean # defining volatility threshold
+correlation_threshold_low = 0.3 # defining no correlation threshold (everything below 0.3 will be considered as not high enough correlation)
+correlation_threshold_high = 0.3 # defining correlation threshold (everything above 0.3 will be considered high enough correlation)
 
-
-
-
-
-# Assuming strategy_type, forward_vix_slope, and other needed data are already available
-
-# Define thresholds based on historical data
-volatility_threshold = volatility_mean
-correlation_threshold_low = -0.3
-correlation_threshold_high = 0.3
-
-# Confirmation check based on the three indicators
-confirmation_check = []
+confirmation_check = [] # pre-allocating memory for the checks to confirm the strategies or eventually modify them
 for i in range(len(vol_indicator_2025)):
-    if vol_indicator_2025[i] < volatility_threshold:
+    if vol_indicator_2025[i] < volatility_threshold: # lower than average volatility is considered as momentum signal
         vol_signal = "Momentum"
     else:
         vol_signal = "Mean Reversion"
     
-    if correlation_indicator_2025[i] < correlation_threshold_low:
-        corr_signal = "Mean Reversion"
-    elif correlation_indicator_2025[i] > correlation_threshold_high:
+    if correlation_indicator_2025[i] >= correlation_threshold_low: # higher than 0.3 correlation is considered as momentum signal
         corr_signal = "Momentum"
+    elif correlation_indicator_2025[i] < correlation_threshold_high: # lower than 0.3 correlation is considered as mean reversion signal
+        corr_signal = "Mean Reversion"
     else:
-        corr_signal = None  # Neutral case, doesn't strongly favor either
+        corr_signal = None  # allowing for a neutral case
     
-    if roc_indicator_2025[i] > 0:
-        roc_signal = "Mean Reversion"
-    else:
+    if roc_indicator_2025[i] < 0: # a negative rate of change in the vix slope is associated to contango, therefore momentum signal
         roc_signal = "Momentum"
+    else:
+        roc_signal = "Mean Reversion"
     
-    # Final confirmation check based on majority vote
-    signals = [vol_signal, corr_signal, roc_signal]
-    signals = [s for s in signals if s is not None]  # Remove neutral cases
+    signals = [vol_signal, corr_signal, roc_signal] # listing the signals coming from the three indicators
+    signals = [s for s in signals if s is not None]  # removing neutral cases
     
-    if signals.count("Momentum") > signals.count("Mean Reversion"):
+    if signals.count("Momentum") > signals.count("Mean Reversion"): # the confirmed strategy will simply be the one which has the majority of "votes"
         confirmation_check.append("Momentum")
     else:
         confirmation_check.append("Mean Reversion")
 
-# Convert to DataFrame
-confirmation_check = pd.Series(confirmation_check, index=forward_vix_slope['Period'])
+confirmation_check = pd.Series(confirmation_check, index = forward_vix_slope['Period']) # converting the results to a dataframe for ease of manipulation
 
-# Compare with original strategy selection
-strategy_comparison = pd.DataFrame(strategy_type, index=forward_vix_slope['Period'], columns=['Strategy'])
-strategy_comparison['Confirmation'] = confirmation_check
+strategy_comparison = pd.DataFrame(strategy_type, index = forward_vix_slope['Period'], columns = ['Strategy']) # comparing checks with initial strategy identification
+strategy_comparison['Confirmation/Double-check'] = confirmation_check # appending the new strategy selections for comparison
 
-
-# Hybrid strategy selection combining transformer with confirmation indicators
-def hybrid_strategy_selection(transformer_signal, vol, corr, roc):
-    # Volatility is the primary factor
-    momentum_strong = vol < volatility_mean
-    mean_reversion_strong = vol > volatility_mean
+def dual_strategy_identification(transformer_signal, vol, corr, roc): # finally defining a function to enhance strategy decision-making process by combining transformer with indicators
     
-    # Secondary confirmations
-    momentum_confirmed = momentum_strong & ((corr > 0.3) | (roc < 0))
-    mean_reversion_confirmed = mean_reversion_strong & ((corr < -0.3) | (roc > 0))
+    momentum_strong = vol < volatility_mean # low volatility is a momentum signal
+    mean_reversion_strong = vol > volatility_mean # high volatility is a mean reversion signal
+    
+    momentum_confirmed = momentum_strong & ((corr >= 0.3) | (roc < 0)) # momentum is eventually confirmed if high correlation and negative rate of change
+    mean_reversion_confirmed = mean_reversion_strong & ((corr < 0.3) | (roc > 0)) # mean reversion is eventually confirmed if low correlation and positive rate of change
 
-    # Hybrid selection: Transformer signal + Confirmation
     strategy = np.where(momentum_confirmed, 'Momentum',
-                np.where(mean_reversion_confirmed, 'Mean Reversion', transformer_signal))  # Default to transformer
+                np.where(mean_reversion_confirmed, 'Mean Reversion', transformer_signal))  # by default, the strategy will be picked among momentum transformer results
     
     return strategy
 
-# Function to evaluate performance
-def evaluate_performance(cumulative_returns):
-    total_return = cumulative_returns.iloc[-1] - 1
-    annualized_return = (1 + total_return) ** (1 / (len(cumulative_returns) / 252)) - 1
-    max_drawdown = (cumulative_returns / cumulative_returns.cummax() - 1).min()
+def performance_assessment(cumulative_returns): # defining a function for displaying key characteristics of the strategy performance
+    total_return = cumulative_returns.iloc[-1] - 1 # computing total returns
+    annualized_return = (1 + total_return) ** (1 / (len(cumulative_returns) / 252)) - 1 # computing annualized returns
+    max_drawdown = (cumulative_returns / cumulative_returns.cummax() - 1).min() # retrieving maximum drawdown
     
-    print(f"Total Return: {total_return:.2%}")
-    print(f"Annualized Return: {annualized_return:.2%}")
-    print(f"Max Drawdown: {max_drawdown:.2%}")
+    print(f"Total return: {total_return:.2%}") # printing total returns
+    print(f"Annualized return: {annualized_return:.2%}") # printing annualized returns
+    print(f"Maximum drawdown: {max_drawdown:.2%}") # printing maximum drawdown
 
-# Apply the hybrid strategy on 2025 data
-final_strategy = hybrid_strategy_selection(strategy_comparison['Strategy'], vol_indicator_2025, correlation_indicator_2025, roc_indicator_2025)
+final_strategy = dual_strategy_identification(strategy_comparison['Strategy'], vol_indicator_2025, correlation_indicator_2025, roc_indicator_2025) # running the double strategy function on 2025 data
 
-def compute_portfolio_returns(strategy, returns):
+def compute_portfolio_returns(strategy, returns): # defining a function that will calculate returns based on the strategy identified and selected
     """
-    Computes portfolio returns based on strategy selection.
-    - If 'Momentum', we assume we follow the market return.
-    - If 'Mean Reversion', we assume we take the opposite sign of returns.
+    If 'Momentum', we assume we follow the market return, while with 
+    'Mean Reversion' we assume we take the opposite sign of returns.
     """
     portfolio_returns = np.where(strategy == 'Momentum', returns, -returns)
     return pd.Series(portfolio_returns, index=returns.index)
 
-# Compute portfolio returns based on the final strategy
-final_portfolio_returns = compute_portfolio_returns(final_strategy, df_2025['2025 SPY prices'].pct_change())
+final_portfolio_returns = compute_portfolio_returns(final_strategy, df_2025['2025 SPY prices'].pct_change()) # calculating portfolio returns based on the final strategy
 
-# Convert returns to cumulative returns
-final_cumulative_returns = (1 + final_portfolio_returns).cumprod()
+final_cumulative_returns = (1 + final_portfolio_returns).cumprod() # computing final cumulative returns
 
-# Evaluate final strategy performance
 print("Final Strategy Performance:")
-evaluate_performance(final_cumulative_returns)
+performance_assessment(final_cumulative_returns) # assessing dual strategy performance
 
-plt.figure(figsize=(12, 6))
-plt.plot((1 + compute_portfolio_returns(strategy_comparison['Strategy'], df_2025['2025 SPY prices'].pct_change())).cumprod(), label="Momentum Transformer Only", linestyle='dashed')
-plt.plot(final_cumulative_returns, label="Hybrid Strategy (Transformer + Indicators)", linewidth=2)
-plt.legend()
-plt.title("Cumulative Returns: Transformer vs Hybrid Strategy")
-plt.xlabel("Date")
-plt.ylabel("Cumulative Return")
+plt.figure(figsize = (12, 6)) # plotting the momentum transformer strategy together with the dual strategy
+plt.plot((1 + compute_portfolio_returns(strategy_comparison['Strategy'], df_2025['2025 SPY prices'].pct_change())).cumprod(), label = "Momentum transformer Only", linestyle = 'dashed') # cumulative returns if using only momentum transformer
+plt.plot(final_cumulative_returns, label = "(Transformer + Indicators) strategy", linewidth = 2) # cumulative returns if using combined strategy
+plt.legend() # displaying legend
+plt.title("Cumulative returns: Transformer vs Combined Strategy") # title of the plot
+plt.xlabel("Date") # x-axis are with dates
+plt.ylabel("Cumulative returns") # cumulative returns on the y-axis
 plt.grid()
 plt.show()
